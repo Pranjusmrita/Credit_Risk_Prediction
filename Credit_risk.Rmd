@@ -1,0 +1,441 @@
+---
+title: "AIP RMD FINAL"
+author: "Group 1"
+date: "12/5/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Install all the packages
+
+```{r}
+library(FSelector)
+# Load e1071 package for svm
+library(e1071)
+library(DEoptimR)
+library(lattice)
+library(ggplot2)
+library(timeDate)
+library(gower)
+library(caret)
+# Load caTools for data partitioning
+library(caTools)
+# Load MASS package for LDA
+library(MASS)
+library(gmodels)
+library(tidyverse)
+library(ROSE)
+library(tree)
+library(maptree)
+# Load randomForest package for Random Forest
+library(randomForest)
+library(pROC)
+library(dplyr)
+library(partykit)
+# Load gbm package for gbm
+library(gbm)
+library(CustomerScoringMetrics)
+```
+
+
+# Step 1: Load and check the dataset
+```{r}
+# Assign assignment_data.csv to loan_data
+loan_data <- read_csv("~/Desktop/AiP assignment/AIP Group Assignment Data/assignment_data.csv")
+# Check the structure of the dataset 
+str(loan_data)
+# Check the data summary to identify the missing values
+summary(loan_data)
+```
+
+
+#Step 2 : Data preparation/encoding 
+## Step 2.1 : Replace missing data and remove missing values
+```{r}
+# replace 0 in education with 4, since the description for level 0 and 4 are the same
+loan_data$EDUCATION[loan_data$EDUCATION=="0"]<-"4"
+
+# Missing data replacement: Using CLT(Central limit theroem) in place of missing values. 
+# 1. Satisfacion NAs not replacing as not needed for modelling this is based on my working experience in banks
+# 2. Not using age but using age category
+# 3. Treating bill payments as utility and household expenses
+# 4. Using PY variables not PYAMT because PY clearly represents the status of payment history 
+# 5. Treating age ctgy NA by inserting mean values of similar group
+
+loan_data <- loan_data %>% group_by(GENDER, EDUCATION, MARRIAGE, DEPENDENT) %>% mutate(AGE_CTG = ifelse(is.na(AGE_CTG), median(AGE_CTG, na.rm = TRUE), AGE_CTG))
+
+# Treating bill payments NA by inserting mean values of similar group
+loan_data <- loan_data %>% group_by(GENDER, EDUCATION, MARRIAGE, DEPENDENT, CREDITCRD, RSTATUS, OTH_ACCOUNT, CAR, SECONDHOME, EMPLOYMENT) %>% mutate(BILL1 = ifelse(is.na(BILL1), mean(BILL1, na.rm = TRUE), BILL1))
+
+loan_data <- loan_data %>% group_by(GENDER, EDUCATION, MARRIAGE, DEPENDENT, CREDITCRD, RSTATUS, OTH_ACCOUNT, CAR, SECONDHOME, EMPLOYMENT) %>% mutate(BILL2 = ifelse(is.na(BILL2), mean(BILL2, na.rm = TRUE), BILL2))
+
+loan_data <- loan_data %>% group_by(GENDER, EDUCATION, MARRIAGE, DEPENDENT, CREDITCRD, RSTATUS, OTH_ACCOUNT, CAR, SECONDHOME, EMPLOYMENT) %>% mutate(BILL3 = ifelse(is.na(BILL3), mean(BILL3, na.rm = TRUE), BILL3))
+
+# BILL4 with NA values doesnt have a similar group with values hence we are taking the avg of whole column   
+filter(loan_data, GENDER == 2, EDUCATION == 2, MARRIAGE == 1, DEPENDENT == 1, CREDITCRD == 3, RSTATUS == 0, OTH_ACCOUNT == 1, CAR == 0, SECONDHOME ==1, EMPLOYMENT == 1, !is.na(BILL4))
+
+loan_data <- loan_data %>% mutate(BILL4 = ifelse(is.na(BILL4), 43175, BILL4))
+
+loan_data <- loan_data %>% group_by(GENDER, EDUCATION, MARRIAGE, DEPENDENT, CREDITCRD, RSTATUS, OTH_ACCOUNT, CAR, SECONDHOME, EMPLOYMENT) %>% mutate(BILL5 = ifelse(is.na(BILL5), mean(BILL5, na.rm = TRUE), BILL5))
+
+loan_data <- loan_data %>% group_by(GENDER, EDUCATION, MARRIAGE, DEPENDENT, CREDITCRD, RSTATUS, OTH_ACCOUNT, CAR, SECONDHOME, EMPLOYMENT) %>% mutate(BILL6 = ifelse(is.na(BILL6), mean(BILL6, na.rm = TRUE), BILL6))
+
+# Check the structure of the laon_data1 dataset 
+str(loan_data)
+
+# Remove the rest of missing value, and assign it to a new dataset loan_data
+loan_data <- na.omit(loan_data)
+
+# Duplicate records: remove duplicate records, assume that it has been accidentally recorded two times. 
+loan_data <- distinct(loan_data)
+
+```
+
+## Step 2.2 : Remove ID and update the data type if necessary
+```{r}
+
+#remove ID
+loan_data$ID <- NULL
+# Update all the categorical data into factors
+columns <- c("GENDER", "EDUCATION", "MARRIAGE", "AGE_CTG", "PY1", "PY2", "PY3", "PY4", "PY5", "PY6", "SATISFACTION", "FREQTRANSACTION", "PHONE", "DEPENDENT", "RSTATUS", "OTH_ACCOUNT", "CAR", "YEARSINADD", "SECONDHOME", "EMPLOYMENT", "NEW_CSTM", "CM_HIST", "CLASS")
+loan_data[columns] <- lapply(loan_data[columns], as.factor)
+
+str(loan_data)
+summary(loan_data)
+
+# Check the level of target variable
+levels(loan_data$CLASS)
+```
+
+## Step 2.3 : Data partitioning 
+```{r}
+# Set a seed to 123
+set.seed(123)
+
+# Generate a vector named partition for data partitioning, partition the dataset into training (70%) and test (40%)
+partition = sample.split(loan_data$CLASS, SplitRatio = 0.70) 
+
+# Generate training and test sets and save as training and test
+training = subset(loan_data, partition == TRUE) 
+test = subset(loan_data, partition == FALSE) 
+```
+
+## Step 2.4 Calcualte Information Gain and keep important features for further modeling 
+```{r}
+# Use function information.gain to compute information gain values of the attributes
+class_weights <- information.gain(CLASS ~., training)
+
+# Print weights
+print(class_weights)
+
+# Use order() function to sort the weights
+sorted_weights <- class_weights[order(class_weights$attr_importance), , drop = F]
+
+# Plot the sorted weights
+barplot(unlist(sorted_weights), 
+        names.arg = rownames(sorted_weights), las = "2", cex.names=0.7,
+        ylim = c(0,0.05), space = 0.5)
+# Filter features where the information gain is not zero
+filter(class_weights, attr_importance > 0)
+
+# Use cutoff.k() to find the most informative 29 attributes
+filtered_attributes <- cutoff.k(class_weights, 29)
+
+#remove AGE (keep age_category)
+filtered_attributes <- filtered_attributes[-15]
+
+# Print filtered attributes
+print(filtered_attributes)
+
+# the biggest IG comes from PY1 in both cases (dropping NA/duplicate OR treating NA) and only using 1 variable is not useful for modelling hence we will use all variables with positive IG
+cutoff.biggest.diff(class_weights)
+
+# Assign sorted data into datamodelling
+datamodelling <- training[filtered_attributes]
+
+datamodelling$CLASS <- training$CLASS
+
+```
+
+## Step 2.5 : Apply oversampling technique to sort imbalanced data
+```{r}
+#proportion between not default and default of training dataset 
+table(training$CLASS)
+# Check the original target variable proportion   
+prop.table(table(training$CLASS))
+
+#Creating oversampled data
+oversampled <- ovun.sample(CLASS~ ., data = datamodelling, method = "over", p=0.4, seed=1)$data
+
+table(oversampled$CLASS)
+# Check the target variable proportion after apply oversamping technique
+prop.table(table(oversampled$CLASS))
+
+```
+
+# Step 3: Data modeling
+
+##  Step 3.1: Decision Tree
+```{r}
+# Load partykit package for Decision Tree
+library(partykit)
+
+# Build a decision tree by using ctree() function
+set.seed(123)
+ctree_model <- ctree(CLASS ~ ., oversampled)
+print(ctree_model)
+# Plot DT
+plot(ctree_model, type = "simple")
+
+# Predicting the test set results
+ctree_predict <-  predict(ctree_model, test, type = "response")
+
+# Calculate the correct predictions
+accuracy_ctree <- length(which(ctree_predict==oversampled$CLASS))/nrow(test)
+accuracy_ctree
+# Generate confusion Matrix for DT
+confusionMatrix(ctree_predict, test$CLASS, positive='1', mode = "prec_recall")
+```
+
+## Step 3.2 : Logistic Regression 
+```{r}
+# Build a logistic regression model assign it to LR_spam
+LR_model <- glm(CLASS ~. , data = oversampled, family = "binomial")
+
+summary(LR_model)
+
+# Predict the class probabilities of the test data
+LR_prob <- predict(LR_model, test, type="response")
+
+# Predict the class - * Prob has been aligned as 0.5 for all the models
+LR_class <- ifelse(LR_prob >= 0.5, "1", "0")
+# Save the predictions as factor variables
+LR_class <- as.factor(LR_class)
+# Find the percentage of correct predictions
+accuracy_LR <- length(which(LR_class == test$CLASS))/nrow(test)
+accuracy_LR
+
+# Save the predictions as factor variables
+LR_class <- as.factor(LR_class)
+
+# Generate confusion Matrix for LR
+confusionMatrix(LR_class, test$CLASS, positive='1', mode = "prec_recall")
+
+```
+
+# Step 3.3 :Support vector machines (SVMs)  
+```{r}
+# kernel = "linear"
+#tune_out_linear = tune(svm, CLASS~., data = training_sample, kernel = "linear", ranges = list(cost=c(0.1, 1, 5)))
+#svm_best_linear = tune_out_linear$best.model
+#accuracy_svm_linear 0.7781997
+
+# kernel = "radial"
+#svm_radial  <- svm(CLASS ~. , data = oversampled, kernel = "radial", scale = TRUE, cost = 5, probability=T)
+#accuracy_svm_radial 0.8073487
+
+#Since the accuracy of the model at linear and radial kernel is lower than polynomial, so that we use the model of polynomial kernel.
+# Set kernel to polynomial provides the best accurary
+set.seed(123)
+tune_out_poly = tune(svm, CLASS~., data = oversampled, kernel = "polynomial", ranges = list(cost=c(0.1, 1, 5)),scale = TRUE,probability = TRUE)
+model_SVM_best =tune_out_poly$best.model
+print(model_SVM_best)
+
+# Predict the class of the test data
+prediction_SVM <- predict(model_SVM_best, test)
+accuracy_svmpoly <- length(which(prediction_SVM == test$CLASS))/nrow(test)
+accuracy_svmpoly
+
+# Use confusionMatrix to print the performance of SVM model
+confusionMatrix(prediction_SVM, test$CLASS, positive = "1", mode = "prec_recall")
+```
+
+# Step 3.4 :Linear discriminant analysis (LDA)  
+```{r linear discriminant analysis}
+## Build an LDA model by using lda() function (With all attributes - collinearity)
+lda_model <- lda(CLASS~., data = oversampled)
+print(lda_model)
+
+# Predict the Test set results 
+lda_predict <- predict(lda_model, test)
+lda_pred <- as.numeric(lda_predict$class)-1
+
+
+# Find the percentage of correct predictions
+accuracy_lda <- length(which(lda_pred == test$CLASS))/nrow(test)
+accuracy_lda
+
+# Use confusionMatrix to print the performance of LDA model
+confusionMatrix(lda_predict$class, test$CLASS, positive='1', mode = "prec_recall")
+```
+
+## Step 3.5 :Random Forest  
+```{r}
+# Set random seed
+set.seed(10)
+
+# Tune a combined hyperparameters
+# list of possible values for mtry, nodesize and sampsize - > Optimal hyperparameters combination: mtry = 7, nodesize = 1, sampsize = 21703
+set.seed(123)
+mtry_val <- seq(3,7,2)
+nodesize_val <- seq(1,10,2)
+sampsize_val <- floor(nrow(oversampled)*c(0.5,0.65,0.8))
+setOfvalues <- expand.grid(mtry = mtry_val,nodesize = nodesize_val,sampsize = sampsize_val)
+err <- c()
+for (i in 1:nrow(setOfvalues)){
+  set.seed(123)
+  model<- randomForest(Class ~ ., oversampled,mtry = setOfvalues$mtry[i], nodesize = setOfvalues$nodesize[i],sampsize = setOfvalues$sampsize[i])
+  err[i]<- model$err.rate[nrow(model$err.rate),"OOB"]
+}
+best_comb <- which.min(err)
+print(setOfvalues[best_comb,])
+
+rf_model <- randomForest(CLASS ~ ., oversampled, mtry = 7, nodesize = 1, sampsize = 21703)
+print(rf_model)
+# Check the important feasure for RF
+importance(rf_model)
+rf_predict <- predict(rf_model, test)
+
+accuracy_rf <- length(which(rf_predict==test$CLASS))/nrow(test)
+accuracy_rf
+
+# Use confusionMatrix to print the performance of RF model
+confusionMatrix(rf_predict,test$CLASS,positive='1', mode='prec_recall')
+```
+
+## Step 3.6 : Gradient boosting machine (GBM) model  
+```{r gbm}
+# Change the data type of the target variable
+oversampled$CLASS <- as.numeric(oversampled$CLASS)-1
+# Set random seed
+set.seed(10)
+
+# Build the GBM model
+GBM_model <- gbm(CLASS~., oversampled, distribution = "bernoulli",n.trees = 500, interaction.depth = 3, cv.folds = 5)
+
+prob_GBM <-  predict(GBM_model, test, n.trees = ntree_opt, type = "response")
+gbm_predict <- ifelse(prob_GBM >= 0.5, "1", "0")
+gbm_predict <- as.factor(gbm_predict)
+
+accuracy_gbm <- length(which(gbm_predict == test$CLASS))/nrow(test)
+accuracy_gbm
+
+confusionMatrix(gbm_predict,test$CLASS, positive='1', mode = "prec_recall")
+
+# Find the best combination of parameters -> n.trees = 1500, interaction.depth = 5, cv.folds = 5.
+#gbm_grid =  expand.grid(interaction.depth = 1:5,n.trees = (1:3) * 500,shrinkage = c(0.01, 0.1), n.minobsinnode = 10)
+#cv_5 = trainControl(method = "cv", number = 5)
+#gbm_tune = train(CLASS ~ ., data = training_sample,method = "gbm",trControl = cv_5,verbose = FALSE,tuneGrid = gbm_grid)
+#gbm_tune$bestTune
+#plot(gbm_tune)
+#gbm_model_tune <- gbm(CLASS~., oversampled, distribution = "bernoulli", n.trees = 1500, interaction.depth = 5, cv.folds = 5, shrinkage = 0.1)
+#Accuracy:0.7977,Recall:0.5102,F1:0.5248
+
+# Use gbm.perf to find the number of trees for the prediction 
+# Consider 500 trees for a good model which is contradict to our tuned hyperparameters, the performance of n.trees = 500 is better 
+#ntree_opt <- gbm.perf(GBM_model,method = "cv")
+#gbm_model_best <- gbm(CLASS~., oversampled, distribution = "bernoulli", n.trees = ntree_opt, interaction.depth = 5, cv.folds = 5, #shrinkage = 0.1)
+#Accuracy:0.7995,Recall:0.5209,F1:0.5322
+
+#We suspect that training enables the model overfitting the dataset, so that the accuracy of the test data is too low, which can be improved by using gbm.perf to find the number of trees for the further prediction.
+```
+
+# Step 4: Model evaluation 
+## Step 4.1 ROC model
+
+```{r}
+# DT
+prod_DT <- predict(ctree_model, test, type = "prob")
+# LR
+prod_LR <- predict(LR_model, test, type="response")
+# LDA
+prob_LDA <- predict(lda_model, test, type = "prob")
+prob_LDA$class <- as.numeric(prob_LDA$class) - 1
+# model_SVM
+SVMpred <- predict(model_SVM_best, test, probability=TRUE)
+# Obtain predicted probabilities for SVM
+prob_SVM <- attr(SVMpred, "probabilities")
+# model_RF
+prob_RF <- predict(rf_model, test, type="prob")
+
+```
+
+# Roc figures
+```{r}
+ROC_DT <- roc(test$CLASS,prod_DT[,2])
+ROC_LR <- roc(test$CLASS,prod_LR)
+ROC_LDA <- roc(test$CLASS, prob_LDA$class)
+ROC_RF <- roc(test$CLASS,prob_RF[,2])
+ROC_SVM <- roc(test$CLASS,prob_SVM[,1])
+ROC_GBM <- roc(test$CLASS,prob_GBM)
+```
+
+```{r}
+df_LR = data.frame((1-ROC_LR$specificities),ROC_LR$sensitivitie)
+df_DT = data.frame((1-ROC_DT$specificities),ROC_DT$sensitivities)
+df_LDA = data.frame((1-ROC_LDA$specificities),ROC_LDA$sensitivities)
+df_SVM = data.frame((1-ROC_SVM$specificities), ROC_SVM$sensitivities)
+df_RF = data.frame((1-ROC_RF$specificities), ROC_RF$sensitivities)
+df_GBM = data.frame((1-ROC_GBM$specificities), ROC_GBM$sensitivities)
+```
+
+```{r}
+#plot the ROC curve for Random Forest, SVM and GBM
+plot(df_SVM, col="red", type="l",
+xlab="False Positive Rate (1-Specificity)", ylab="True Positive Rate (Sensitivity)",main="ROC Curve") 
+lines(df_RF, col="blue",type="l") #adds ROC curve for RF
+lines(df_GBM, col="green",type="l") #adds ROC curve for GBM
+lines(df_LR, col="yellow",type="l") #adds ROC curve for LR
+lines(df_DT, col="pink",type="l") #adds ROC curve for DT
+lines(df_LDA, col="black",type="l") #adds ROC curve for LDA
+grid(NULL, lwd = 1)
+abline(a = 0, b = 1, col = "lightgray") #adds a diagonal line
+legend("bottomright",c("SVM", "Random Forest", "GBM","LR","DT","LDA"),
+fill=c("red","blue", "green","yellow","pink","black"))
+```
+
+```{r}
+auc(ROC_RF)
+auc(ROC_SVM)
+auc(ROC_LDA)
+auc(ROC_GBM)
+auc(ROC_LR)
+auc(ROC_DT)
+```
+
+# Step 4.2 Culmulative Response (Gain) chart for these models
+```{r}
+# install.packages("CustomerScoringMetrics")
+library(CustomerScoringMetrics)
+```
+
+```{r}
+# Extract the gain values for Gain chart
+GainTable_RF <- cumGainsTable(prob_RF[,2], test$CLASS, resolution = 1/100)
+
+GainTable_SVM <- cumGainsTable(prob_SVM[,2], test$CLASS, resolution = 1/100)
+
+GainTable_LDA <- cumGainsTable(prob_LDA$class, test$CLASS, resolution = 1/100)
+
+GainTable_GBM <- cumGainsTable(prob_GBM, test$CLASS, resolution = 1/100)
+
+GainTable_LR <- cumGainsTable(prod_LR, test$CLASS, resolution = 1/100)
+
+GainTable_DT <- cumGainsTable(prod_DT[,2], test$CLASS, resolution = 1/100)
+
+# Plot the ROC curve for Random Forest and SVM
+
+plot(GainTable_SVM[,4], col="red", type="l",
+xlab="Percentage of test instances", ylab="Percentage of correct predictions",main="Gain Chart")
+lines(GainTable_RF[,4], col="blue", type ="l")
+lines(GainTable_LDA[,4], col="black", type ="l")
+lines(GainTable_GBM[,4], col="green", type ="l")
+lines(GainTable_LR[,4], col="yellow", type ="l")
+lines(GainTable_DT[,4], col="pink", type ="l")
+grid(NULL, lwd = 1)
+legend("bottomright",c("SVM", "Random Forest", "GBM","LR","DT","LDA"),
+fill=c("red","blue", "green","yellow","pink","black"))
+
+```
+
